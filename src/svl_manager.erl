@@ -50,19 +50,20 @@ terminate(_Reason, State) ->
 handle_info({notify, Name, halted}, State) ->
     case maps:get(Name, State, undefined) of
 	undefined ->
-	    ?LOG_ERROR("Unrecognized name in notify: ~ts", [Name]),
+	    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
 	    {noreply, State};
 	#manager_state{pid = Pid, mtime = udefined} ->
 	    %% if mtime is undefined then this job is supposed to be removed
 	    svl_jobs_sup:delete(Pid),
 	    {noreply, maps:remove(Name, State)};
-	Job_state ->
-	    {noreply, maps:update(Name, Job_state#manager_state{job_info = halted}, State)}
+	_ ->
+	    %% in this case do nothing, because there must be a start on going anyway.
+	    {noreply, State}
     end;
 handle_info({notify, Name, Info}, State) ->
     case maps:get(Name, State, undefined) of
 	undefined ->
-	    ?LOG_ERROR("Unrecognized name in notify: ~ts", [Name]),
+	    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
 	    {noreply, State};
 	Job_state ->
 	    {noreply, maps:update(Name, Job_state#manager_state{job_info = Info}, State)}
@@ -123,7 +124,7 @@ wait_any_job(State) ->
 	{notify, Name, halted} ->
 	    case maps:get(Name, State, undefined) of
 		undefined ->
-		    ?LOG_ERROR("Unrecognized name in notify: ~ts", [Name]),
+		    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
 		    State;
 		#manager_state{pid = Pid} ->
                     svl_jobs_sup:delete(Pid),

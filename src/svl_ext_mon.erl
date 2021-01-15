@@ -79,17 +79,24 @@ start(Data = #ext_mon_data{script = Script}) ->
     Data#ext_mon_data{port = Port}.
 
 %% log the text
-log(Binary, Data = #ext_mon_data{buffer = Buffer}) ->
+log(Binary, Data = #ext_mon_data{name = Name, buffer = Buffer}) ->
     Lines = re:split(Binary, "\n"),
-    Remain = flush_log(Lines, Buffer),
+    {Remain, Out_buffer} = flush_log(Lines, [], Buffer),
+    case Out_buffer of
+	[] -> ok;
+	_ ->
+	    Out_lines = lists:join(10, lists:reverse(Out_buffer)),
+	    ?LOG_NOTICE("~ts says:~ts", [Name, Out_lines])
+    end,
     Data#ext_mon_data{buffer = Remain}.
 
-%% flush log until last line, return the remaining string
-flush_log([Head], <<>>) -> Head;
-flush_log([Head], Buffer) -> <<Buffer/binary,Head/binary>>;
-flush_log([Head | Tail], Buffer) ->
-    ?LOG_NOTICE([Buffer, Head]),
-    flush_log(Tail, <<>>).
+%% flush log until last line, return the remaining string and accumated output
+flush_log([Head], Out_buffer, <<>>) -> {Head, Out_buffer};
+flush_log([Head], Out_buffer, Buffer) -> {<<Buffer/binary,Head/binary>>, Out_buffer};
+flush_log([Head | Tail], Out_buffer, <<>>) ->
+    flush_log(Tail, [Head | Out_buffer], <<>>);
+flush_log([Head | Tail], Out_buffer, Buffer) ->
+    flush_log(Tail, [[Buffer, Head] | Out_buffer], <<>>).
 
 %% state callbacks
 
@@ -102,7 +109,7 @@ halted(cast, stop, Data) ->
 
 %% from booting
 %% log binary from port
-booting(info, {data, Binary}, Data) -> {keep_state, log(Binary, Data)};
+booting(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
 %% no error is good news
 booting(state_timeout, timeout, Data = #ext_mon_data{name = Name}) ->
     ?LOG_DEBUG("~ts booted", [Name]),
@@ -124,7 +131,7 @@ booting(cast, stop, Data = #ext_mon_data{name = Name}) ->
 
 %% from running
 %% log the data
-running(info, {data, Binary}, Data) -> {keep_state, log(Binary, Data)};
+running(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
 %% port closed
 running(info, {'EXIT', _Port, Reason}, Data = #ext_mon_data{name = Name}) ->
     ?LOG_WARNING("~ts halted unexpectedly: ~ts", [Name, Reason]),
@@ -139,7 +146,7 @@ running(cast, stop, Data = #ext_mon_data{name = Name}) ->
 
 %% from halting
 %% log the data
-halting(info, {data, Binary}, Data) -> {keep_state, log(Binary, Data)};
+halting(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
 halting(info, {'EXIT', _Port, Reason}, Data = #ext_mon_data{name = Name}) ->
     svl_manager:notify(Name, halted),
     ?LOG_DEBUG("~ts halted: ~ts", [Name, Reason]),
