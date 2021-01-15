@@ -12,7 +12,7 @@
 -export([add/2, delete/1]).
 
 start_link() ->
-    supervisor:start_link(?MODULE, []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init(_Args) ->
     SupFlags = #{strategy => simple_one_for_one,

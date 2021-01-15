@@ -12,7 +12,7 @@
 
 %% apis
 -export([start_link/0]).
--export([refresh/0, info/1]).
+-export([refresh/0, info/0, info/1]).
 -export([notify/2]).
 -export([init/1, terminate/2, handle_call/3, handle_cast/2, handle_info/2]).
 
@@ -25,16 +25,17 @@ start_link() ->
 %% client side api
 
 %% from the monitor to report status
+%% the reason I use a direct message instead of a cast is I want to do custom receive
 notify(Name, Info) -> 
     ?MODULE ! {notify, Name, Info}.
 
 %% from user
-refresh() ->
-    gen_server:cast(?MODULE, refresh).
+refresh() -> gen_server:cast(?MODULE, refresh).
 
 %% get the infos for job names
-info(Names) ->
-    gen_server:call(?MODULE, {info, Names}).
+info() -> gen_server:call(?MODULE, info).
+
+info(Names) -> gen_server:call(?MODULE, {info, Names}).
 
 %% server side api
 
@@ -67,50 +68,43 @@ handle_info({notify, Name, Info}, State) ->
 	    {noreply, maps:update(Name, Job_state#manager_state{job_info = Info}, State)}
     end.
 
-handle_cast(refresh, State) ->
-    {noreply, refresh_state(State)}.
+handle_cast(refresh, State) -> {noreply, refresh_state(State)}.
 
-handle_call({info, Names}, _From, State) ->
-    %% make sure the names are valid
-    Job_Names =
-	case Names of
-	    [] ->
-		maps:keys(State);
-	    _ ->
-		lists:filter(fun(Each) -> 
-				     maps:is_key(Each, State)
-			     end, Names)
-	end,
+handle_call(info, _From, State) ->
     Job_infos = lists:map(fun(Each) ->
 				  Job_state = maps:get(Each, State),
-				  Job_state#manager_state.job_info
-			  end, Job_Names),
+				  {Each, Job_state#manager_state.job_info}
+			  end, maps:keys(State)),
+    {reply, Job_infos, State};
+handle_call({info, Names}, _From, State) ->
+    Job_infos = lists:map(
+		  fun(Each) ->
+			  case maps:get(Each, State, undefined) of
+			      undefined -> {Each, undefined};
+			      #manager_state{job_info = Info} -> {Each, Info}
+			  end
+		  end, Names),
     {reply, Job_infos, State}.
 
 %% internal server side functions
 root_dir() ->
     case application:get_env(root_dir) of
-	undefined ->
-	    lists:flatten([os:getenv("HOME", ""), "/svl"]);
-	{ok, Dir} ->
-	    Dir
+	undefined -> lists:flatten([os:getenv("HOME", ""), "/svl"]);
+	{ok, Dir} -> Dir
     end.
 
 launch_job(Dir, Name) ->
     case svl_jobs_sup:add(Name, lists:flatten([Dir, $/, Name])) of
-	{ok, undefined} ->
-	    error("Cannot start child");
-	{ok, Pid} ->
-	    Pid ! start,
-	    #manager_state{pid = Pid, job_info = halted}
+    	{ok, undefined} -> error("Cannot start child");
+	{ok, Pid} -> #manager_state{pid = Pid, job_info = booting}
     end.
 
 start_job(Job_state = #manager_state{pid = Pid}) ->
-    Pid ! start,
+    gen_statem:cast(Pid, start),
     Job_state.
 
 stop_job(Job_state = #manager_state{pid = Pid}) ->
-    Pid ! stop,
+    gen_statem:cast(Pid, stop),
     Job_state.
 
 stop_all_jobs(State) ->
@@ -120,10 +114,8 @@ stop_all_jobs(State) ->
 
 wait_all_jobs(State) ->
     case maps:size(State) of
-	0 ->
-	    ok;
-	_ ->
-	    wait_all_jobs(wait_any_job(State))
+	0 -> ok;
+	_ -> wait_all_jobs(wait_any_job(State))
     end.
 
 wait_any_job(State) ->
@@ -138,7 +130,7 @@ wait_any_job(State) ->
                     maps:remove(Name, State)
             end;
 	_ ->
-	    %% ignore everything else, not important anymore
+ 	    %% ignore everything else, not important anymore
 	    State
     end.
 
@@ -183,7 +175,7 @@ scan_dir(Prefix, Dir) ->
 	    lists:map(
 	      fun(Name) ->
 		      File = lists:flatten([Dir, $/, Name]),
-		      New_name = lists:flatten([Prefix, $/, Name]),
+		      New_name = Prefix ++ Name,
 		      case is_legal(Name) of
 			  false -> [];
 			  true -> scan_file(New_name, File)
@@ -204,7 +196,7 @@ scan_file(Name, File) ->
 	{error, _Reason} -> [];
 	{ok, #file_info{type = Type, mode = Mode, mtime = Mtime}} ->
 	    %% rwxrwxrwx and x bit not set is false
-	    if Type == directory -> scan_dir(Name, File);
+	    if Type == directory -> scan_dir(Name ++ "/", File);
 	       Type /= regular -> [];
 	       Mode rem 2 == 0 -> [];
 	       Mode div 8 rem 2 == 0 -> [];
@@ -212,6 +204,3 @@ scan_file(Name, File) ->
 	       true -> {Name, Mtime}
 	    end
     end.
-
-
-    
