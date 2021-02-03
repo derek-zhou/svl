@@ -31,12 +31,10 @@ init([]) ->
                  period => 1},
     ChildSpecs = [#{id => svl_jobs_sup,
 		    start => {svl_jobs_sup, start_link, []},
-		    type => supervisor, 
-		    modules => [svl_jobs_sup]},
+		    type => supervisor},
 		 #{id => svl_manager,
 		   start => {svl_manager, start_link, []},
-		   type => worker,
-		   modules => [svl_manager]}],
+		   type => worker}],
     {ok, {SupFlags, ChildSpecs}}.
 
 %% internal functions

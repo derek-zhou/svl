@@ -18,11 +18,11 @@
 -export([halted/3, booting/3, running/3, halting/3, blackout/3]).
 
 %% the data record to hold extended
--record(ext_mon_data, {name,
-		       script,
-		       buffer = <<>>,
-		       crash_count = 0,
-		       port}).
+-record(ext_mon_data, {name :: string(),
+		       script :: string(),
+		       buffer = [] :: list(),
+		       crash_count = 0 :: integer(),
+		       port :: port()}).
 
 %% apis
 start_link(Name, Script) -> gen_statem:start_link(?MODULE, {Name, Script}, []).
@@ -38,27 +38,19 @@ init({Name, Script}) ->
 			script = Script}),
      [{state_timeout, 1000, timeout}]}.
 
-terminate(_Reason, State, Data) ->
-    case State of
-	halted -> ok;
-	_ -> kill(Data)
-    end.
+terminate(_Reason, halted, _Data) -> ok;
+terminate(_Reason, _, Data) -> kill(Data).
 	    
 callback_mode() -> state_functions.
 
 %% internal functions
 crash_count(#ext_mon_data{crash_count = Count}) -> Count.
 
+pid(#ext_mon_data{port = undefined}) -> undefined;
 pid(#ext_mon_data{port = Port}) ->
-    case Port of
+    case erlang:port_info(Port) of
 	undefined -> undefined;
-	_ ->
-	    case erlang:port_info(Port) of
-		undefined ->
-		    undefined;
-		Plist ->
-		    proplists:get_value(os_pid, Plist)
-	    end
+	Plist -> proplists:get_value(os_pid, Plist)
     end.
 
 kill(Data) ->
@@ -79,94 +71,89 @@ start(Data = #ext_mon_data{script = Script}) ->
     Data#ext_mon_data{port = Port}.
 
 %% log the text
+log(<<>>, Data) -> Data;
 log(Binary, Data = #ext_mon_data{name = Name, buffer = Buffer}) ->
-    Lines = re:split(Binary, "\n"),
-    {Remain, Out_buffer} = flush_log(Lines, [], Buffer),
-    case Out_buffer of
-	[] -> ok;
-	_ ->
-	    Out_lines = lists:join(10, lists:reverse(Out_buffer)),
-	    ?LOG_NOTICE("~ts says:~ts", [Name, Out_lines])
-    end,
-    Data#ext_mon_data{buffer = Remain}.
-
-%% flush log until last line, return the remaining string and accumated output
-flush_log([Head], Out_buffer, <<>>) -> {Head, Out_buffer};
-flush_log([Head], Out_buffer, Buffer) -> {<<Buffer/binary,Head/binary>>, Out_buffer};
-flush_log([Head | Tail], Out_buffer, <<>>) ->
-    flush_log(Tail, [Head | Out_buffer], <<>>);
-flush_log([Head | Tail], Out_buffer, Buffer) ->
-    flush_log(Tail, [[Buffer, Head] | Out_buffer], <<>>).
+    case string:take(Binary, "\n", true) of
+	{_, <<>>} ->
+	    Data#ext_mon_data{buffer = Buffer ++ [Binary]};
+	{Leading, Trailing} ->
+	    ?LOG_NOTICE("~ts says: ~ts~ts", [Name, Buffer, Leading]),
+	    [_ | Remain] = string:next_codepoint(Trailing),
+	    log(Remain, Data#ext_mon_data{buffer = []})
+    end.
 
 %% state callbacks
 
 %% from halt
 halted(cast, start, Data = #ext_mon_data{name = Name}) ->
-    svl_manager:notify(Name, booting),
+    svl_manager:notify(Name, self(), booting),
     {next_state, booting, start(Data), [{state_timeout, 1000, timeout}]};
 halted(cast, stop, Data) ->
     {keep_state, Data}.
 
 %% from booting
 %% log binary from port
-booting(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
+booting(info, {Port, {data, Binary}}, Data = #ext_mon_data{port = Port}) ->
+    {keep_state, log(Binary, Data)};
 %% no error is good news
 booting(state_timeout, timeout, Data = #ext_mon_data{name = Name}) ->
     ?LOG_DEBUG("~ts booted", [Name]),
-    svl_manager:notify(Name, {running, pid(Data)}),
+    svl_manager:notify(Name, self(), {running, pid(Data)}),
     {next_state, running, Data#ext_mon_data{crash_count = 0}};
 %% port did not happen, or quited during booting
-booting(info, {'EXIT', _Port, Reason}, Data = #ext_mon_data{name = Name}) ->
-    ?LOG_WARNING("~ts crashed: ~ts", [Name, Reason]),
+booting(info, {'EXIT', Port, Reason}, Data = #ext_mon_data{name = Name, port = Port}) ->
+    ?LOG_WARNING("~ts crashed: ~p", [Name, Reason]),
     Crash_count = crash_count(Data) + 1,
-    svl_manager:notify(Name, {blackout, Crash_count}),
+    svl_manager:notify(Name, self(), {blackout, Crash_count}),
     {next_state, blackout, Data#ext_mon_data{port = undefined, crash_count = Crash_count},
     [{state_timeout, blackout_period(Crash_count), timeout}]};
 %% got start/stop message
 booting(cast, start, Data) -> {keep_state, Data};
 booting(cast, stop, Data = #ext_mon_data{name = Name}) ->
     kill(Data),
-    svl_manager:notify(Name, {halting, pid(Data)}),
+    svl_manager:notify(Name, self(), {halting, pid(Data)}),
     {next_state, halting, Data#ext_mon_data{crash_count = 0}}.
 
 %% from running
 %% log the data
-running(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
+running(info, {Port, {data, Binary}}, Data = #ext_mon_data{port = Port}) ->
+    {keep_state, log(Binary, Data)};
 %% port closed
-running(info, {'EXIT', _Port, Reason}, Data = #ext_mon_data{name = Name}) ->
-    ?LOG_WARNING("~ts halted unexpectedly: ~ts", [Name, Reason]),
-    svl_manager:notify(Name, booting),
+running(info, {'EXIT', Port, Reason}, Data = #ext_mon_data{name = Name, port = Port}) ->
+    ?LOG_WARNING("~ts halted unexpectedly: ~p", [Name, Reason]),
+    svl_manager:notify(Name, self(), booting),
     {next_state, booting, start(Data), [{state_timeout, 1000, timeout}]};
 %% got start/stop message
 running(cast, start, Data) -> {keep_state, Data};
 running(cast, stop, Data = #ext_mon_data{name = Name}) ->
     kill(Data),
-    svl_manager:notify(Name, {halting, pid(Data)}),
+    svl_manager:notify(Name, self(), {halting, pid(Data)}),
     {next_state, halting, Data}.
 
 %% from halting
 %% log the data
-halting(info, {_Port, {data, Binary}}, Data) -> {keep_state, log(Binary, Data)};
-halting(info, {'EXIT', _Port, Reason}, Data = #ext_mon_data{name = Name}) ->
-    svl_manager:notify(Name, halted),
-    ?LOG_DEBUG("~ts halted: ~ts", [Name, Reason]),
+halting(info, {Port, {data, Binary}}, Data = #ext_mon_data{port = Port}) ->
+    {keep_state, log(Binary, Data)};
+halting(info, {'EXIT', Port, Reason}, Data = #ext_mon_data{name = Name, port = Port}) ->
+    svl_manager:notify(Name, self(), halted),
+    ?LOG_DEBUG("~ts halted: ~p", [Name, Reason]),
     {next_state, halted, Data#ext_mon_data{port = undefined}};
 %% got start/stop message
 halting(cast, start, Data = #ext_mon_data{name = Name}) ->
     %% just pretend I am running. Once the job quit it will be restarted
-    svl_manager:notify(Name, {running, pid(Data)}),
+    svl_manager:notify(Name, self(), {running, pid(Data)}),
     {next_state, running, Data};
 halting(cast, stop, Data) -> {keep_state, Data}.
 
 %% from blackout
 blackout(state_timeout, timeout, Data = #ext_mon_data{name = Name}) ->
     ?LOG_DEBUG("~ts blackout period expired", [Name]),
-    svl_manager:notify(Name, booting),
+    svl_manager:notify(Name, self(), booting),
     {next_state, booting, start(Data), [{state_timeout, 1000, timeout}]};
 %% got start/stop message
 blackout(cast, start, Data = #ext_mon_data{name = Name}) ->
-    svl_manager:notify(Name, booting),
+    svl_manager:notify(Name, self(), booting),
     {next_state, booting, start(Data), [{state_timeout, 1000, timeout}]};
 blackout(cast, stop, Data = #ext_mon_data{name = Name}) ->
-    svl_manager:notify(Name, halted),
+    svl_manager:notify(Name, self(), halted),
     {next_state, halted, Data}.

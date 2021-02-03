@@ -12,12 +12,15 @@
 
 %% apis
 -export([start_link/0]).
--export([refresh/0, info/0, info/1]).
--export([notify/2]).
+-export([refresh/0, kill_all/0, info/0, info/1]).
+-export([notify/3]).
 -export([init/1, terminate/2, handle_call/3, handle_cast/2, handle_info/2]).
 
+-type job_info() :: atom() | {atom(), integer()}.
 %% The state is a map from names to a record
--record(manager_state, {pid, mtime, job_info}).
+-record(manager_state, {pid :: pid(),
+			mtime :: file:date_time(),
+			job_info :: job_info()}).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -26,15 +29,23 @@ start_link() ->
 
 %% from the monitor to report status
 %% the reason I use a direct message instead of a cast is I want to do custom receive
-notify(Name, Info) -> 
-    ?MODULE ! {notify, Name, Info}.
+-spec notify(string(), pid(), job_info()) -> any().
+notify(Name, Pid, Info) -> 
+    ?MODULE ! {notify, Name, Pid, Info}.
 
 %% from user
+-spec refresh() -> any().
 refresh() -> gen_server:cast(?MODULE, refresh).
 
 %% get the infos for job names
+-spec info() -> [job_info()].
 info() -> gen_server:call(?MODULE, info).
 
+%% kill all jobs and wait. This is mainly for testing
+-spec kill_all() -> ok.
+kill_all() -> gen_server:call(?MODULE, kill_all).
+
+-spec info([string()]) -> [job_info()].
 info(Names) -> gen_server:call(?MODULE, {info, Names}).
 
 %% server side api
@@ -47,7 +58,7 @@ terminate(_Reason, State) ->
     wait_all_jobs(stop_all_jobs(State)),
     ok.
 
-handle_info({notify, Name, halted}, State) ->
+handle_info({notify, Name, _From, halted}, State) ->
     case maps:get(Name, State, undefined) of
 	undefined ->
 	    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
@@ -60,17 +71,21 @@ handle_info({notify, Name, halted}, State) ->
 	    %% in this case do nothing, because there must be a start on going anyway.
 	    {noreply, State}
     end;
-handle_info({notify, Name, Info}, State) ->
+handle_info({notify, Name, From, Info}, State) ->
     case maps:get(Name, State, undefined) of
 	undefined ->
 	    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
 	    {noreply, State};
 	Job_state ->
-	    {noreply, maps:update(Name, Job_state#manager_state{job_info = Info}, State)}
+	    {noreply, maps:update(Name, Job_state#manager_state{pid = From,
+								job_info = Info},
+				  State)}
     end.
 
 handle_cast(refresh, State) -> {noreply, refresh_state(State)}.
 
+handle_call(kill_all, _From, State) ->
+    {reply, ok, wait_all_jobs(stop_all_jobs(State))};
 handle_call(info, _From, State) ->
     Job_infos = lists:map(fun(Each) ->
 				  Job_state = maps:get(Each, State),
@@ -115,13 +130,13 @@ stop_all_jobs(State) ->
 
 wait_all_jobs(State) ->
     case maps:size(State) of
-	0 -> ok;
+	0 -> State;
 	_ -> wait_all_jobs(wait_any_job(State))
     end.
 
 wait_any_job(State) ->
     receive
-	{notify, Name, halted} ->
+	{notify, Name, _From, halted} ->
 	    case maps:get(Name, State, undefined) of
 		undefined ->
 		    ?LOG_WARNING("Unrecognized name in notify: ~ts", [Name]),
