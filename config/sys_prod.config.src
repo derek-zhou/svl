@@ -1,0 +1,25 @@
+[
+ { kernel,
+    [
+     {logger_level, info},
+     {logger,
+      [{ handler, default, logger_std_h,
+	 #{ level => notice }
+       },
+       { handler, disk_log, logger_disk_log_h,
+	 #{ config => #{ file => "${HOME}/svl_log" },
+	    level => info,
+	    filter_default => stop,
+	    filters =>
+		[{ svl_log,
+		   {fun logger_filters:domain/2, {log, sub, [otp, svl]}}
+		 }],
+	    formatter => {logger_formatter,
+			  #{ template => [time, " ", what, " ", level, ": ", msg, "\n"] }
+			 }
+	  }
+       }]
+     }
+    ]
+ }
+].
